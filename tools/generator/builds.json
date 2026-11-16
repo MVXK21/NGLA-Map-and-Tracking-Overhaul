@@ -1,0 +1,6 @@
+{
+  "vanilla": ["Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm"],
+  "tr": ["Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm", "Tamriel_Data.esm", "TR_Mainland.esm"],
+  "tr-pc-shotn": ["Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm", "Tamriel_Data.esm", "TR_Mainland.esm",
+                  "Sky_Main.ESM", "Cyr_Main.ESM"]
+}
