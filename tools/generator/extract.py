@@ -165,6 +165,7 @@ def extract(world: World) -> dict:
     ext_doors: list[tuple[esm.CellRef, esm.Cell]] = []
     links: dict[str, set[str]] = defaultdict(set)
     exits_to_ext: dict[str, list] = defaultdict(list)   # interior -> exterior door targets
+    interior_doors: dict[str, list] = defaultdict(list)  # interior -> [(door pos, target interior or None, dest pos)]
     north: dict[str, float] = {}
 
     for key, cell in world.cells.items():
@@ -179,6 +180,9 @@ def extract(world: World) -> dict:
                 if ref.dest_cell and ref.dest_cell.lower() in interiors:
                     ext_doors.append((ref, cell))
             else:
+                tgt = ref.dest_cell.lower() if ref.dest_cell else None
+                if tgt is None or tgt in interiors:
+                    interior_doors[key[1]].append((ref.pos, tgt, ref.dest_pos))
                 if ref.dest_cell:
                     t = ref.dest_cell.lower()
                     # quasi-exteriors are map roots, not part of any dungeon
@@ -288,7 +292,40 @@ def extract(world: World) -> dict:
 
     unowned = sorted(interiors[c].name for c in interiors if c not in owner)
 
+    # Way out of every interior, for the compass:
+    #   exits[cell] = doors in that cell leading outdoors: (door x, y, exterior x, y)
+    #   route[cell] = for cells with no outdoor door, the door one step closer to one
+    exits: dict[str, list] = {}
+    for c, doors in interior_doors.items():
+        if c in quasi_keys:
+            continue
+        outs = [(round(p[0]), round(p[1]), round(d[0]), round(d[1])) for p, t, d in doors if t is None]
+        if outs:
+            exits[c] = outs
+    route: dict[str, tuple] = {}
+    dist = {c: 0 for c in exits}
+    frontier = list(exits)
+    # reverse index: which cells have a door into a given cell
+    into: dict[str, list] = defaultdict(list)
+    for c, doors in interior_doors.items():
+        if c in quasi_keys:
+            continue
+        for p, t, d in doors:
+            if t is not None and t != c and t not in quasi_keys:
+                into[t].append((c, p))
+    while frontier:
+        nxt = []
+        for b in frontier:
+            for a, p in into.get(b, ()):
+                if a not in dist:
+                    dist[a] = dist[b] + 1
+                    route[a] = (round(p[0]), round(p[1]))
+                    nxt.append(a)
+        frontier = nxt
+
     return {
+        "exits": exits,
+        "route": route,
         "locations": locations,
         "north_markers": north,
         "quasi_exteriors": quasi,

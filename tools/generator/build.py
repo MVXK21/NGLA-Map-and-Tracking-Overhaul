@@ -32,7 +32,11 @@ def main():
     ap.add_argument("profile")
     ap.add_argument("--px", type=int, default=16, help="pixels per cell (8, 16, 32, 64)")
     ap.add_argument("--cfg", help="openmw.cfg whose data= dirs hold the content files")
+    ap.add_argument("--install", action="store_true",
+                    help="also write tiles + Lua data into mod/ (uses 32px/cell unless --px given)")
     args = ap.parse_args()
+    if args.install and "--px" not in __import__("sys").argv:
+        args.px = 32
 
     profiles = json.loads((HERE / "builds.json").read_text())
     content = profiles[args.profile]
@@ -83,6 +87,12 @@ def main():
     ]
     (out / "report.txt").write_text("\n".join(report), encoding="utf-8")
     print("\n".join(report[:9]))
+    if args.install:
+        import export
+        r = export.export(REPO / "mod", img, frame, locs, args.profile, [p.name for p in paths])
+        print(f"Installed into mod/: {r['tiles']} of {r['of']} tiles (empty ocean skipped)")
+        n = export.export_interiors(REPO / "mod", data["north_markers"], data["exits"], data["route"])
+        print(f"Interior compass data: {n['exits']} cells with outdoor doors, {n['route']} with a route out")
     print(f"Done in {time.time() - t0:.1f}s -> {out}")
 
 
