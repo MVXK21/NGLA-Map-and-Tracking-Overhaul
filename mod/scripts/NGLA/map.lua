@@ -284,29 +284,50 @@ local function image(path, color, size, pos)
     }
 end
 
+-- Tile pyramid level for the current zoom: the coarsest level that still has
+-- at least one texel per screen pixel (the finest when zoomed in past it).
+local function pickLevel()
+    local need = zoom * data.pxPerCell        -- screen pixels per cell
+    local best = data.levels[1]               -- levels are listed finest first
+    for _, lv in ipairs(data.levels) do
+        if lv.px >= need then best = lv end
+    end
+    return best
+end
+
+local builtCenter = nil                       -- center at the last buildLayer, for drag refreshes
+
 local function buildLayer()
     local content = {}
     shownMarkers = {}
-    local ts = data.tileSize * zoom
+    builtCenter = center
 
-    for _, t in ipairs(data.tiles) do
-        content[#content + 1] = {
-            type = ui.TYPE.Image,
-            props = {
-                resource = tex(string.format('textures/NGLA/map/t_%d_%d.png', t[1], t[2])),
-                position = v2(math.floor(t[1] * ts), math.floor(t[2] * ts)),
-                size = v2(math.ceil(ts) + 1, math.ceil(ts) + 1),
-            },
-        }
+    -- the visible area plus a margin; tiles and markers outside it aren't drawn
+    local half = v2(viewSize.x / zoom * 0.75, viewSize.y / zoom * 0.75)
+    local x0, x1 = center.x - half.x, center.x + half.x
+    local y0, y1 = center.y - half.y, center.y + half.y
+
+    local lv = pickLevel()
+    local span = data.tileSize * data.pxPerCell / lv.px   -- map pixels covered by one tile
+    local ts = span * zoom
+    for _, t in ipairs(lv.tiles) do
+        local tx, ty = t[1] * span, t[2] * span
+        if tx + span >= x0 and tx <= x1 and ty + span >= y0 and ty <= y1 then
+            content[#content + 1] = {
+                type = ui.TYPE.Image,
+                props = {
+                    resource = tex(string.format('textures/NGLA/map/t%d_%d_%d.png', lv.px, t[1], t[2])),
+                    position = v2(math.floor(t[1] * ts), math.floor(t[2] * ts)),
+                    size = v2(math.ceil(ts) + 1, math.ceil(ts) + 1),
+                },
+            }
+        end
     end
 
     local trackedByKey = {}
     for _, t in ipairs(tracked) do trackedByKey[t.key] = t end
 
     -- ordinary markers inside the visible area (plus a margin), capped
-    local half = v2(viewSize.x / zoom * 0.75, viewSize.y / zoom * 0.75)
-    local x0, x1 = center.x - half.x, center.x + half.x
-    local y0, y1 = center.y - half.y, center.y + half.y
     local count = 0
     for _, loc in ipairs(data.locations) do
         if not loc.s and (not loc.t or zoom >= TOWN_ZOOM) then
@@ -363,6 +384,12 @@ local function buildLayer()
 end
 
 local function moveLayer()
+    -- dragged far enough that the margin runs out: redraw around the new spot
+    if builtCenter and math.max(math.abs(center.x - builtCenter.x) * zoom,
+                                math.abs(center.y - builtCenter.y) * zoom) > math.min(viewSize.x, viewSize.y) * 0.2 then
+        buildLayer()
+        return
+    end
     mapLayer.layout.props.position = layerOffset()
     mapLayer:update()
 end

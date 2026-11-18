@@ -68,6 +68,7 @@ class World:
     script_targets: dict[str, set[str]] = field(default_factory=dict)  # script id -> PositionCell target cells
     # info id -> (speaker id, PositionCell targets, scripts started)
     info_targets: dict[str, tuple[str, set[str], set[str]]] = field(default_factory=dict)
+    ltex: dict[int, dict[int, str]] = field(default_factory=dict)      # plugin index -> LTEX index -> texture
 
 
 # Developer, test and holding cells: never markers, door targets or sub-maps.
@@ -111,7 +112,7 @@ def cell_key(cell: esm.Cell) -> tuple:
 def load_world(paths: list[Path], with_land: bool = True, log=print) -> World:
     world = World([p.name for p in paths])
     lower_names = [p.name.lower() for p in paths]
-    wanted = {"CELL", "REGN", "SCPT", "INFO"} | _SCRIPTED_OBJECTS | ({"LAND"} if with_land else set())
+    wanted = {"CELL", "REGN", "SCPT", "INFO"} | _SCRIPTED_OBJECTS | ({"LAND", "LTEX"} if with_land else set())
     for file_idx, path in enumerate(paths):
         masters = [m.lower() for m in esm.read_masters(path)]
         master_idx = [lower_names.index(m) if m in lower_names else -1 for m in masters]
@@ -124,11 +125,19 @@ def load_world(paths: list[Path], with_land: bool = True, log=print) -> World:
                 land = esm.parse_land(rec)
                 if land is not None:
                     n_land += 1
+                    if land.textures is not None:
+                        land.tex_plugin = file_idx
                     old = world.land.get(land.grid)
                     if old is not None:  # a plugin may override only some LAND subrecords
                         land.heights = land.heights if land.heights is not None else old.heights
                         land.colors = land.colors if land.colors is not None else old.colors
+                        if land.textures is None:
+                            land.textures, land.tex_plugin = old.textures, old.tex_plugin
                     world.land[land.grid] = land
+            elif rec.type == "LTEX":
+                lt = esm.parse_ltex(rec)
+                if lt is not None:
+                    world.ltex.setdefault(file_idx, {})[lt[0]] = lt[1]
             elif rec.type == "REGN":
                 rid = esm.cstr(rec.first("NAME") or b"").lower()
                 fnam = rec.first("FNAM")

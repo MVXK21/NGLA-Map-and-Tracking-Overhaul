@@ -22,6 +22,7 @@ from pathlib import Path
 
 import extract
 import render
+import vfs
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -33,17 +34,18 @@ def main():
     ap.add_argument("--px", type=int, default=16, help="pixels per cell (8, 16, 32, 64)")
     ap.add_argument("--cfg", help="openmw.cfg whose data= dirs hold the content files")
     ap.add_argument("--install", action="store_true",
-                    help="also write tiles + Lua data into mod/ (uses 32px/cell unless --px given)")
+                    help="also write tiles + Lua data into mod/ (uses 64px/cell unless --px given)")
     args = ap.parse_args()
     if args.install and "--px" not in __import__("sys").argv:
-        args.px = 32
+        args.px = 64
 
     profiles = json.loads((HERE / "builds.json").read_text())
     content = profiles[args.profile]
     cfg = args.cfg or json.loads((HERE / "paths.local.json").read_text())["openmw_cfg"]
 
     t0 = time.time()
-    paths = extract.resolve_content(content, extract.read_openmw_cfg(Path(cfg)))
+    data_dirs = extract.read_openmw_cfg(Path(cfg))
+    paths = extract.resolve_content(content, data_dirs)
     print("Loading:")
     world = extract.load_world(paths)
     print(f"Merged: {len(world.cells)} cells, {len(world.land)} land records ({time.time() - t0:.1f}s)")
@@ -54,9 +56,11 @@ def main():
     out = REPO / "output" / args.profile
     out.mkdir(parents=True, exist_ok=True)
 
-    img, frame = render.render(world, px=args.px)
-    img.save(out / "map.png")
-    render.draw_locations(img, frame, locs).save(out / "map_debug.png")
+    files = vfs.VFS(data_dirs, vfs.read_archives(Path(cfg)))
+    img, frame = render.render(world, px=args.px, vfs=files)
+    with_roads = render.draw_roads(img, frame)   # img itself stays road-free for the tile pyramid
+    with_roads.save(out / "map.png")
+    render.draw_locations(with_roads, frame, locs).save(out / "map_debug.png")
 
     payload = {
         "profile": args.profile,
@@ -99,7 +103,8 @@ def main():
     if args.install:
         import export
         r = export.export(REPO / "mod", img, frame, locs, args.profile, [p.name for p in paths])
-        print(f"Installed into mod/: {r['tiles']} of {r['of']} tiles (empty ocean skipped)")
+        print(f"Installed into mod/: {r['tiles']} tiles (empty ocean skipped); per level: "
+              + ", ".join(f"{px}px/cell {n}" for px, n in r['levels']))
         n = export.export_interiors(REPO / "mod", data["north_markers"], data["exits"], data["route"])
         print(f"Interior compass data: {n['exits']} cells with outdoor doors, {n['route']} with a route out")
     print(f"Done in {time.time() - t0:.1f}s -> {out}")

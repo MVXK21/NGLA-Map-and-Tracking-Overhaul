@@ -156,6 +156,10 @@ class Land:
     grid: tuple[int, int]
     heights: "object | None" = None   # numpy float32 (65, 65), game units; row 0 = south edge
     colors: "object | None" = None    # numpy uint8 (65, 65, 3)
+    # numpy uint16 (16, 16), row 0 = south: 0 = default texture, n = LTEX index n-1
+    # of the plugin the texture data came from (see tex_plugin)
+    textures: "object | None" = None
+    tex_plugin: int = -1
 
 
 def parse_land(rec: Record):
@@ -179,4 +183,17 @@ def parse_land(rec: Record):
     if vclr is not None and len(vclr) >= LAND_SIZE * LAND_SIZE * 3:
         land.colors = np.frombuffer(vclr, dtype=np.uint8, count=LAND_SIZE * LAND_SIZE * 3).reshape(
             LAND_SIZE, LAND_SIZE, 3)
+    vtex = rec.first("VTEX")
+    if vtex is not None and len(vtex) >= 512:
+        # stored as 4x4 blocks of 4x4 texels; untangle into a plain 16x16 grid
+        raw = np.frombuffer(vtex, dtype="<u2", count=256).reshape(4, 4, 4, 4)  # y1, x1, y2, x2
+        land.textures = raw.transpose(0, 2, 1, 3).reshape(16, 16).copy()
     return land
+
+
+def parse_ltex(rec: Record) -> tuple[int, str] | None:
+    """LTEX -> (index, texture file name)."""
+    intv, data = rec.first("INTV"), rec.first("DATA")
+    if intv is None or data is None:
+        return None
+    return struct.unpack_from("<I", intv)[0], cstr(data)
