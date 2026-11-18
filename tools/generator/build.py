@@ -78,15 +78,24 @@ def main():
         f"{sum(not l.town_interior for l in ent)} others)",
         f"landmarks (named exterior cells): {sum(l.kind == 'landmark' for l in locs)}",
         f"interior cells grouped under entrances: {sum(len(l.cells) for l in ent)}",
-        f"interiors not reachable from any exterior door: {len(data['unreachable_interiors'])}",
+        f"teleport-only places placed: {len(data['teleport_locations'])}",
+        f"dev/test cells filtered: {len(data['dev_cells'])}",
+        f"interiors still unplaced: {len(data['unreachable_interiors'])}",
         f"NorthMarkers: {len(data['north_markers'])}",
         f"quasi-exteriors: {', '.join(data['quasi_exteriors'])}",
         "",
-        "== unreachable interiors (script teleports, test cells, unused) ==",
+        "== teleport-only places (name @ cell grid <- cells in the group) ==",
+        *(f"{l.name} @ {l.grid} <- {', '.join(l.cells[:4])}{' ...' if len(l.cells) > 4 else ''}"
+          for l in data["teleport_locations"]),
+        "",
+        "== still unplaced (no door out, nothing found that teleports in) ==",
         *data["unreachable_interiors"],
+        "",
+        "== dev / test cells filtered ==",
+        *data["dev_cells"],
     ]
     (out / "report.txt").write_text("\n".join(report), encoding="utf-8")
-    print("\n".join(report[:9]))
+    print("\n".join(report[:11]))
     if args.install:
         import export
         r = export.export(REPO / "mod", img, frame, locs, args.profile, [p.name for p in paths])

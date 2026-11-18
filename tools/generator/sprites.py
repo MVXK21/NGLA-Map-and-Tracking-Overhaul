@@ -2,7 +2,7 @@
 
     python sprites.py
 
-Writes to mod/textures/MapMarkers/icons/:
+Writes to mod/textures/NGLA/icons/:
     white.png         plain white, tinted in Lua for backgrounds
     dot.png           white marker dot with a dark rim, tinted per marker type
     arrow_00..15.png  player arrow in 16 headings, 22.5 degrees apart,
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-OUT = Path(__file__).resolve().parents[2] / "mod" / "textures" / "MapMarkers" / "icons"
+OUT = Path(__file__).resolve().parents[2] / "mod" / "textures" / "NGLA" / "icons"
 
 
 def main():

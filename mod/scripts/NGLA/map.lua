@@ -1,4 +1,4 @@
--- OpenMW Map Markers: world map window.
+-- NGLA Map and Tracking Overhaul: world map window.
 --
 -- Replaces the built-in Map window.
 --   M            open the map on its own (full size); M again closes it
@@ -13,24 +13,32 @@ local util = require('openmw.util')
 local self = require('openmw.self')
 local async = require('openmw.async')
 local input = require('openmw.input')
+local storage = require('openmw.storage')
 local I = require('openmw.interfaces')
 
-local data = require('scripts.MapMarkers.generated.data')
+local trackingSettings = storage.playerSection('SettingsNGLATracking')
+
+local data = require('scripts.NGLA.generated.data')
 
 local v2 = util.vector2
 local rgb = util.color.rgb
 local CELL = 8192
 
-local ICONS = 'textures/MapMarkers/icons/'
+local ICONS = 'textures/NGLA/icons/'
 local HEADER_H = 28
 local SEARCH_W = 240
 local ROW_H = 22
 local MAX_RESULTS = 8
-local ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.06, 2.0, 1.25
+local ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.06, 8.0, 1.25
 local TOWN_ZOOM = 0.7          -- town houses/shops appear at this zoom and closer
 local MAX_MARKERS = 900
 local DRAG_THRESHOLD = 4       -- pixels the mouse must move before a press becomes a drag
-local MAX_TRACKED = 5
+local MAX_TRACKED = 5          -- hard cap (one colour each); the setting picks 1..5
+
+local function maxTracked()
+    local n = math.floor(tonumber(trackingSettings:get('maxTracked')) or MAX_TRACKED)
+    return math.max(1, math.min(MAX_TRACKED, n))
+end
 local PIN_REACHED = 600        -- game units: a pin clears when the player gets this close
 
 local LAYOUTS = {
@@ -62,6 +70,7 @@ local visible = false
 local mode = nil                   -- 'full' | 'compact'
 local openSolo = false             -- set by the M key just before opening
 local press = nil                  -- {pos, center, moved}
+local mouseOff = nil               -- last cursor offset over the map viewport (nil when off it)
 local highlight = nil              -- search result being shown: {mx, my}
 local hoverText = nil
 local searchText = ''
@@ -166,8 +175,8 @@ local function trackLocation(loc)
         untrack(i, 'Stopped tracking: ')
         return
     end
-    if #tracked >= MAX_TRACKED then
-        ui.showMessage(string.format('You can track up to %d destinations. Click one to stop tracking it.', MAX_TRACKED))
+    if #tracked >= maxTracked() then
+        ui.showMessage(string.format('You can track up to %d destinations. Click one to stop tracking it.', maxTracked()))
         return
     end
     tracked[#tracked + 1] = { key = key, name = loc.n, x = loc.x, y = loc.y, color = freeColor(), kind = loc.k }
@@ -175,8 +184,8 @@ local function trackLocation(loc)
 end
 
 local function addPin(x, y)
-    if #tracked >= MAX_TRACKED then
-        ui.showMessage(string.format('You can track up to %d destinations. Right-click a pin to remove it.', MAX_TRACKED))
+    if #tracked >= maxTracked() then
+        ui.showMessage(string.format('You can track up to %d destinations. Right-click a pin to remove it.', maxTracked()))
         return
     end
     pinCounter = pinCounter + 1
@@ -190,7 +199,7 @@ end
 -- auto-clear: entering a tracked location's entrance cell, standing in a tracked
 -- landmark's exterior cell, or getting close to a pin
 local function checkReached()
-    if #tracked == 0 then return end
+    if #tracked == 0 or trackingSettings:get('autoClear') == false then return end
     local cell = self.cell
     if not cell then return end
     local cellName = (cell.name or ''):lower()
@@ -201,8 +210,10 @@ local function checkReached()
                 local dx, dy = self.position.x - t.x, self.position.y - t.y
                 if dx * dx + dy * dy < PIN_REACHED * PIN_REACHED then untrack(i, 'Reached ') end
             end
-        elseif cellName ~= '' and cellName == t.name:lower() then
-            untrack(i, 'Reached ')
+        elseif cellName ~= '' then
+            -- "Mournhold" is reached in "Mournhold, Plaza Brindisi Dorom" too
+            local n = t.name:lower()
+            if cellName == n or cellName:sub(1, #n + 2) == n .. ', ' then untrack(i, 'Reached ') end
         end
     end
 end
@@ -282,7 +293,7 @@ local function buildLayer()
         content[#content + 1] = {
             type = ui.TYPE.Image,
             props = {
-                resource = tex(string.format('textures/MapMarkers/map/t_%d_%d.png', t[1], t[2])),
+                resource = tex(string.format('textures/NGLA/map/t_%d_%d.png', t[1], t[2])),
                 position = v2(math.floor(t[1] * ts), math.floor(t[2] * ts)),
                 size = v2(math.ceil(ts) + 1, math.ceil(ts) + 1),
             },
@@ -522,6 +533,7 @@ local function createWindow(which)
                 end
             end),
             mouseMove = async:callback(function(e)
+                mouseOff = e.offset
                 if press then
                     local d = e.position - press.pos
                     if press.moved or d:length() > DRAG_THRESHOLD then
@@ -533,6 +545,9 @@ local function createWindow(which)
                 else
                     updateHover(e.offset)
                 end
+            end),
+            focusLoss = async:callback(function()
+                mouseOff = nil
             end),
             mouseRelease = async:callback(function(e)
                 if not press or e.button ~= 1 then return end
@@ -626,6 +641,7 @@ end
 local function hide()
     visible = false
     press = nil
+    mouseOff = nil
     if root then
         root.layout.props.visible = false
         root:update()
@@ -639,8 +655,20 @@ I.UI.registerWindow('Map', show, hide)
 local function onMouseWheel(vertical)
     if not visible or not vertical or vertical == 0 then return end
     local z = vertical > 0 and zoom * ZOOM_STEP or zoom / ZOOM_STEP
-    zoom = math.max(ZOOM_MIN, math.min(ZOOM_MAX, z))
+    z = math.max(ZOOM_MIN, math.min(ZOOM_MAX, z))
+    if z == zoom then return end
+    if mouseOff and not press then
+        -- keep the map point under the cursor fixed while zooming
+        local mx, my = viewToMap(mouseOff)
+        zoom = z
+        local nx, ny = viewToMap(mouseOff)
+        center = v2(center.x + (mx - nx), center.y + (my - ny))
+        clampCenter()
+    else
+        zoom = z
+    end
     buildLayer()
+    if mouseOff then updateHover(mouseOff) end
 end
 
 local function onKeyPress(key)
@@ -689,7 +717,7 @@ local function onLoad(saved)
 end
 
 return {
-    interfaceName = 'MapMarkers',
+    interfaceName = 'NGLA',
     interface = {
         version = 1,
         -- For the compass (and other mods): a copy of the tracked destinations.

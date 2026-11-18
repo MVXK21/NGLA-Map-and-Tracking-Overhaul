@@ -3,5 +3,5 @@ __pycache__/
 output/
 tools/generator/paths.local.json
 # generated per profile by build.py --install
-mod/textures/MapMarkers/map/
-mod/scripts/MapMarkers/generated/
+mod/textures/NGLA/map/
+mod/scripts/NGLA/generated/
