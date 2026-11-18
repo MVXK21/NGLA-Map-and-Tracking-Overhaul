@@ -247,7 +247,30 @@ def extract(world: World) -> dict:
     """Build the location list, door graph and NorthMarker table."""
     interiors = {k[1]: c for k, c in world.cells.items() if k[0] == "int" and not is_dev_cell(c.name)}
     dev_cells = sorted(c.name for k, c in world.cells.items() if k[0] == "int" and is_dev_cell(c.name))
-    quasi_keys = {k for k, c in interiors.items() if c.flags & esm.CELL_BEHAVE_EXTERIOR}
+    # "Behave like exterior" cells are sub-map roots (Mournhold) only when no door
+    # chain from the outside world leads into them. Mods that flag the Vivec or
+    # Molag Mar plazas this way keep those plazas as ordinary interiors.
+    flagged = {k for k, c in interiors.items() if c.flags & esm.CELL_BEHAVE_EXTERIOR}
+    door_to: dict[str, set[str]] = defaultdict(set)
+    reached: set[str] = set()
+    for key, cell in world.cells.items():
+        for ref in world.refs.get(key, {}).values():
+            t = ref.dest_cell.lower() if ref.dest_pos is not None and ref.dest_cell else None
+            if t in interiors:
+                if key[0] == "ext":
+                    reached.add(t)
+                elif key[1] in interiors:
+                    door_to[key[1]].add(t)
+    frontier = list(reached)
+    while frontier:
+        nxt = []
+        for a in frontier:
+            for b in door_to.get(a, ()):
+                if b not in reached:
+                    reached.add(b)
+                    nxt.append(b)   # walk on through plazas too
+        frontier = nxt
+    quasi_keys = flagged - reached
 
     # exterior doors -> interiors, and interior -> interior links.
     # Quasi-exterior cells (Mournhold) act as small exterior maps of their own.
@@ -380,7 +403,7 @@ def extract(world: World) -> dict:
             ))
 
     # quasi-exterior interiors (Mournhold etc.)
-    quasi = sorted(c.name for c in interiors.values() if c.flags & esm.CELL_BEHAVE_EXTERIOR)
+    quasi = sorted(interiors[k].name for k in quasi_keys)
 
     teleport_locs, unowned = _teleport_locations(world, interiors, quasi_keys, links, exits_to_ext,
                                                  owner, loc_by_id)

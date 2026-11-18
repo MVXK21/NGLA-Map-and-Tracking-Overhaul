@@ -5,3 +5,4 @@ tools/generator/paths.local.json
 # generated per profile by build.py --install
 mod/textures/NGLA/map/
 mod/scripts/NGLA/generated/
+dist/

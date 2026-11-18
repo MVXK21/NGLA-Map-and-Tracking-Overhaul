@@ -87,8 +87,17 @@ their own load order (new landmasses included). Plan:
 - It writes to its own data folder (e.g. `NGLA Custom Data/`) that the player adds after the main
   mod. OpenMW's later data dirs win, so this overrides the shipped pack without touching it, and deleting
   the folder reverts to stock.
-- The mod compares the data pack's recorded content list with the live load order and offers a "your map
-  is out of date, re-run the generator" notice when they differ.
+- (Not built yet) The mod compares the data pack's recorded content list with the live load order and
+  offers a "your map is out of date, re-run the generator" notice when they differ.
+
+Distribution (decided 2026-11-17): the three main files go on Nexus; the generator exe is published only
+as a GitHub release next to its source and linked from Nexus, because antivirus scanners (Nexus's
+included) often flag PyInstaller programs. Its readme explains running it from source instead.
+Permissions: free use, modification, patches, add-ons, translations and reuse of code, with credit;
+Valcule's compass textures stay under Valcule's permissions.
+
+Built for 1.0.0: `tools/generator/ngla_generate.py` (frozen to `NGLA Map Generator.exe`) and
+`tools/package.py`, which stages and zips the three main files plus the generator into `dist/`.
 
 ## Marker style
 
