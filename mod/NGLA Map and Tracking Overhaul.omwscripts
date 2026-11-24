@@ -1,3 +1,5 @@
-PLAYER: scripts/NGLA/settings.lua
+MENU: scripts/NGLA/menu.lua
 PLAYER: scripts/NGLA/map.lua
 PLAYER: scripts/NGLA/compass.lua
+GLOBAL: scripts/NGLA/global.lua
+NPC, CREATURE: scripts/NGLA/actor.lua

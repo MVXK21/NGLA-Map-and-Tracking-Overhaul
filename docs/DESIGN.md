@@ -99,6 +99,37 @@ Valcule's compass textures stay under Valcule's permissions.
 Built for 1.0.0: `tools/generator/ngla_generate.py` (frozen to `NGLA Map Generator.exe`) and
 `tools/package.py`, which stages and zips the three main files plus the generator into `dist/`.
 
+## Fast travel (1.1.0, decided 2026-11-23)
+
+Clicking a location opens a small box with **Fast Travel** and **Mark**. Defaults: on, instant, every
+location allowed. Settings: enable, "takes time" (distance-based), "only places you've been".
+Always blocked in combat, while over-encumbered, and when the game has teleporting disabled.
+
+- Landing spots come from the generator (`a`, `ac`, `ag` in data.lua): just outside the door via its exit
+  door's arrival point; the inside arrival for one-way doors; the nearest door arrival for named places;
+  flat open ground if there is none; the game's own PositionCell or travel destination for teleport-only places.
+- The map pauses the game, so the combat and companion survey runs after it closes: `map.lua` asks nearby
+  actors (`actor.lua`), then `global.lua` teleports the player and followers and advances time.
+- Visited places are recorded in the save from the moment 1.1.0 is installed.
+
+## Controller (1.1.0)
+
+A selects, X pins, B closes the popup then the map, right stick zooms (real time, because paused frames
+have no game time). A waits two frames and does nothing if the engine turned the press into a mouse click.
+If the engine's B also leaves the menu, the map reopens at the same view.
+
+The full map has a rebindable key and an optional controller button (`SettingsNGLAControls`). They are NGLA's own
+settings rather than the shared `inputBinding` registry, which other mods report overwriting each other's binds.
+A, B and X aren't offered because they act on the map.
+
+## Quest-controlled doors (1.1.0)
+
+Some doors only exist at certain quest stages (Raven Rock, Strongholds, Firemoth...). `tools/generator/gates.py`
+compiles each door's mwscript into rules on global variables and journal indexes (`generated/gates.lua`; `g=` on a
+location). `global.lua` evaluates them about once a second and tells `map.lua` which to hide; hidden doors leave the
+map, search and tracking. Doors for different stages are separate markers. Scripts that depend on anything else
+(local variables, death counts) stay visible rather than risk hiding a real place.
+
 ## Marker style
 
 Plain coloured dots, no per-type icons (decided 2026-11-17: keep the mod simple; the core loop is open

@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO / "tools" / "generator"))
 import build      # noqa: E402
 import extract    # noqa: E402
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 MOD_NAME = "NGLA Map and Tracking Overhaul"
 PROFILES = [("vanilla", "Vanilla"), ("tr", "TR"), ("tr-pc-shotn", "TR-PC-SHotN")]
 
@@ -32,7 +32,9 @@ STATIC = [
     "l10n",
     "scripts/NGLA/compass.lua",
     "scripts/NGLA/map.lua",
-    "scripts/NGLA/settings.lua",
+    "scripts/NGLA/global.lua",
+    "scripts/NGLA/actor.lua",
+    "scripts/NGLA/menu.lua",
     "textures/NGLA/compass",
     "textures/NGLA/icons",
 ]

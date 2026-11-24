@@ -15,15 +15,20 @@ compass points you there.
   - Yellow: settlements and named places
   - Red: wilderness locations
   - Blue: buildings inside towns (shown when zoomed in)
+  - Buildings that quests construct or remove (Raven Rock, Strongholds) appear only while they exist.
 - **Search** by name: type part of a name and the map jumps to the result.
-- **Tracking:** click a location to track it (up to 5 at once, each with its own colour). Right-click
+- **Fast travel:** click a location and choose **Fast Travel** or **Mark**. You arrive just outside its
+  door, with your companions. It's blocked in combat, while over-encumbered and when the game has
+  teleporting disabled. Optional settings: make it take game time, or limit it to places you've been.
+- **Tracking:** choose Mark to track a location (up to 5 at once, each with its own colour). Right-click
   empty map to drop a pin. Tracking stops by itself when you arrive.
 - **Compass** at the top of the screen with N/E/S/W and your tracked destinations, showing the name and
   distance of the one ahead. Indoors it points to the exit that leads towards your destination and
   turns with each interior's own north.
 - **Your position** on the map, with the direction you're facing.
 - **Settings:** compass size and position, label, how many destinations to track, stop tracking on
-  arrival.
+  arrival, fast travel (on/off, time cost, visited places only), and the full map's key and controller
+  button.
 
 ## Requirements
 
@@ -66,13 +71,17 @@ are simply forgotten.
 
 | | |
 |---|---|
-| **M** | open the full-size map; M again closes it |
+| **M** (rebindable) | open the full-size map; press again to close it |
 | **Tab** (inventory menu) | the map appears in the usual map window |
 | drag | move the map |
 | mouse wheel | zoom (towards the cursor) |
-| left-click a marker | track it / stop tracking it |
+| left-click a marker | open the Fast Travel / Mark box (or just mark it, if fast travel is off) |
 | right-click empty map | drop a pin; right-click a pin to remove it |
 | search box | type a name; Enter or click a result to jump to it |
+
+**On a controller:** move the cursor as usual, **A** selects a marker or popup option, **right stick**
+forward/back zooms, **X** drops or removes a pin, and **B** closes the popup, then the map. Typing in the
+search box still needs a keyboard. You can assign a controller button to the full map in the settings.
 
 ## Your own load order: the optional generator
 

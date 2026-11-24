@@ -1,12 +1,13 @@
 -- NGLA Map and Tracking Overhaul: world map window.
 --
 -- Replaces the built-in Map window.
---   M            open the map on its own (full size); M again closes it
+--   M            open the map on its own (full size); M again closes it (key and pad button are settings)
 --   Tab menu     compact map in the built-in map's usual spot
 --   drag         pan                 mouse wheel   zoom
---   left-click   track / stop tracking a location
+--   left-click   a location: popup with Fast Travel and Mark (just Mark if fast travel is off)
 --   right-click  drop a pin on empty map / remove a pin
 --   search box   type a name, click a result (or press Enter) to jump to it
+--   controller   A select, X pin, B close the popup, right stick zoom
 
 local ui = require('openmw.ui')
 local util = require('openmw.util')
@@ -14,9 +15,14 @@ local self = require('openmw.self')
 local async = require('openmw.async')
 local input = require('openmw.input')
 local storage = require('openmw.storage')
+local core = require('openmw.core')
+local nearby = require('openmw.nearby')
+local types = require('openmw.types')
 local I = require('openmw.interfaces')
 
 local trackingSettings = storage.playerSection('SettingsNGLATracking')
+local travelSettings = storage.playerSection('SettingsNGLAFastTravel')
+local controlSettings = storage.playerSection('SettingsNGLAControls')
 
 local data = require('scripts.NGLA.generated.data')
 
@@ -35,11 +41,29 @@ local MAX_MARKERS = 900
 local DRAG_THRESHOLD = 4       -- pixels the mouse must move before a press becomes a drag
 local MAX_TRACKED = 5          -- hard cap (one colour each); the setting picks 1..5
 
+local function mapKey()
+    return controlSettings:get('mapKey') or input.KEY.M
+end
+
+-- the chosen controller button, or nil ('padLeftShoulder' -> CONTROLLER_BUTTON.LeftShoulder)
+local function mapButton()
+    local name = controlSettings:get('mapButton')
+    if not name or name == 'padNone' then return nil end
+    return input.CONTROLLER_BUTTON[name:sub(4)]
+end
+
 local function maxTracked()
     local n = math.floor(tonumber(trackingSettings:get('maxTracked')) or MAX_TRACKED)
     return math.max(1, math.min(MAX_TRACKED, n))
 end
 local PIN_REACHED = 600        -- game units: a pin clears when the player gets this close
+local POPUP_ROW_H = 26
+local SURVEY_FRAMES = 5        -- frames to wait for nearby actors to answer the combat/follower check
+local UNITS_PER_HOUR = 18000   -- optional time cost: roughly walking pace at the default timescale
+local MIN_TRAVEL_HOURS, MAX_TRAVEL_HOURS = 0.25, 72
+local STICK_DEADZONE = 0.22
+local STICK_ZOOM_RATE = 1.6       -- zoom speed at full stick
+local STICK_ZOOM_INTERVAL = 0.05  -- seconds between map redraws while zooming
 
 local LAYOUTS = {
     -- M: centred, large
@@ -75,11 +99,23 @@ local highlight = nil              -- search result being shown: {mx, my}
 local hoverText = nil
 local searchText = ''
 local results = {}
+local visited = {}                 -- lowercase names of cells (and their towns) the player has been in
+local pendingTravel = nil          -- {loc, wait, hostile, followers}: running after the map closes
+local popupLoc = nil               -- location the click popup is open for
+local hiddenGates = {}             -- quest gates whose doors don't exist yet (or any more)
+local popupButtons, popupHover = nil, nil  -- the open popup's buttons, and the one under the cursor
+local popupAnchor = nil            -- where the popup was opened
+local frameCount = 0
+local lastMousePressFrame = -10    -- so one press of A can't count as both a click and a pad press
+local pendingPadClick = nil        -- frame A was pressed, waiting to see if the engine also clicked
+local popupHiddenFrame = -10       -- frame the map closed with the popup open
+local keepMap, restoreCenter = nil, nil    -- B closes the popup, not the map behind it
+local stickZoomTimer, lastWheelFrame = 0, -100
 
 local pendingClose, typedM = false, false
 local clearCheckTimer = 0
 
-local root, mapLayer, resultsEl
+local root, mapLayer, resultsEl, popupEl
 local header, placeholder
 local viewSize
 local shownMarkers = {}            -- markers drawn in the last build, for hit testing
@@ -140,6 +176,11 @@ local function arrowIndex(yaw)
 end
 
 -- ------------------------------------------------------------------ tracking
+
+-- false for a door the current quest state has disabled (Raven Rock before it's built)
+local function locExists(loc)
+    return not (loc.g and hiddenGates[loc.g])
+end
 
 local function locKey(loc)
     return string.format('%s@%d,%d', loc.n, loc.x, loc.y)
@@ -218,6 +259,82 @@ local function checkReached()
     end
 end
 
+-- ------------------------------------------------------------------ fast travel
+
+local function recordVisit()
+    local name = (self.cell and self.cell.name or ''):lower()
+    if name == '' or visited[name] then return end
+    visited[name] = true
+    local town = name:match('^([^,]+),')       -- "balmora, guild of mages" also counts as Balmora
+    if town then visited[town] = true end
+end
+
+local function travelEnabled()
+    return travelSettings:get('enabled') ~= false
+end
+
+-- why this location can't be travelled to right now (nil = it can). The combat
+-- check needs an unpaused frame, so it runs after the map closes.
+local function travelBlocked(loc)
+    if not loc.a then return 'There is no safe place to arrive at ' .. loc.n .. '.' end
+    if not types.Player.isTeleportingEnabled(self.object) then return 'You cannot fast travel right now.' end
+    if types.Actor.getEncumbrance(self.object) > types.Actor.getCapacity(self.object) then
+        return 'You are carrying too much to fast travel.'
+    end
+    if travelSettings:get('visitedOnly') == true and not visited[loc.n:lower()] then
+        return 'You can only fast travel to places you have been to.'
+    end
+    return nil
+end
+
+local function travelHours(loc)
+    if travelSettings:get('passTime') ~= true then return 0 end
+    local px, py = playerSpot()
+    if not px then return MIN_TRAVEL_HOURS end
+    local dx, dy = loc.x - px, loc.y - py
+    return math.max(MIN_TRAVEL_HOURS, math.min(MAX_TRAVEL_HOURS, math.sqrt(dx * dx + dy * dy) / UNITS_PER_HOUR))
+end
+
+local function startTravel(loc)
+    pendingTravel = { loc = loc, followers = {}, hostile = false }
+    I.UI.setMode()                             -- close the map; the rest runs once the game unpauses
+end
+
+local function finishTravel(t)
+    pendingTravel = nil
+    if t.hostile then
+        ui.showMessage('You cannot fast travel while enemies are attacking you.')
+        return
+    end
+    local a = t.loc.a
+    core.sendGlobalEvent('NGLA_FastTravel', {
+        player = self.object, followers = t.followers, cell = t.loc.ac,
+        x = a[1], y = a[2], z = a[3], rot = a[4], ground = t.loc.ag or false,
+        hours = travelHours(t.loc),
+    })
+end
+
+local function onUpdate()
+    local t = pendingTravel
+    if not t or I.UI.getMode() ~= nil then return end
+    if not t.wait then
+        for _, actor in ipairs(nearby.actors) do
+            if actor ~= self.object then actor:sendEvent('NGLA_Survey', self.object) end
+        end
+        t.wait = SURVEY_FRAMES
+        return
+    end
+    t.wait = t.wait - 1
+    if t.wait <= 0 then finishTravel(t) end
+end
+
+local function onSurveyReply(reply)
+    local t = pendingTravel
+    if not t then return end
+    if reply.hostile then t.hostile = true end
+    if reply.follower then t.followers[#t.followers + 1] = reply.actor end
+end
+
 -- ------------------------------------------------------------------ search
 
 local function trim(s) return (s:gsub('^%s+', ''):gsub('%s+$', '')) end
@@ -228,7 +345,7 @@ local function runSearch(text)
     if #q < 2 then return end
     local found, seen = {}, {}
     for _, loc in ipairs(data.locations) do
-        if not loc.s then
+        if not loc.s and locExists(loc) then
             local name = loc.n:lower()
             local p = name:find(q, 1, true)
             if p then
@@ -330,7 +447,7 @@ local function buildLayer()
     -- ordinary markers inside the visible area (plus a margin), capped
     local count = 0
     for _, loc in ipairs(data.locations) do
-        if not loc.s and (not loc.t or zoom >= TOWN_ZOOM) then
+        if not loc.s and locExists(loc) and (not loc.t or zoom >= TOWN_ZOOM) then
             local mx, my = worldToMap(loc.x, loc.y)
             if mx >= x0 and mx <= x1 and my >= y0 and my <= y1 then
                 local size, color
@@ -415,7 +532,8 @@ local function updateHover(off)
     if m and m.pin then
         text = m.pin.name .. '  (right-click to remove)'
     elseif m then
-        text = m.loc.n .. (m.track and '  (tracked - click to stop)' or '  (click to track)')
+        text = m.loc.n .. (travelEnabled() and '  (click for options)'
+            or (m.track and '  (tracked - click to stop)' or '  (click to track)'))
     end
     hoverText = text
     setHeader(text or defaultHeader())
@@ -464,19 +582,116 @@ selectResult = function(loc)
     highlight = { mx = mx, my = my }
     results = {}
     renderResults()
-    setHeader(loc.n .. '  (click it to track)')
+    setHeader(loc.n .. (travelEnabled() and '  (click it for options)' or '  (click it to track)'))
     buildLayer()
+end
+
+-- ------------------------------------------------------------------ click popup
+
+-- Flat like the search results: background, button bars, labels, then an
+-- invisible full-width image per button that takes the click.
+local function closePopup()
+    if not popupLoc then return end
+    popupLoc = nil
+    popupButtons, popupHover = nil, nil
+    if visible and not mouseOff then mouseOff = popupAnchor end   -- the cursor is still about here
+    if popupEl then
+        popupEl.layout.content = ui.content {}
+        popupEl.layout.props.size = v2(0, 0)
+        popupEl:update()
+    end
+end
+
+local function openPopup(loc, off)
+    popupLoc = loc
+    popupAnchor = off
+    local blocked = travelBlocked(loc)
+    local isTracked = findTracked(locKey(loc)) ~= nil
+    local buttons = {
+        { label = 'Fast Travel', color = blocked and COLOR_TEXT_DIM or COLOR_TEXT, action = function()
+            closePopup()
+            local why = travelBlocked(loc)
+            if why then ui.showMessage(why) else startTravel(loc) end
+        end },
+        { label = isTracked and 'Unmark' or 'Mark', color = COLOR_TEXT, action = function()
+            closePopup()
+            trackLocation(loc)
+            buildLayer()
+            if mouseOff then updateHover(mouseOff) end
+        end },
+    }
+    popupButtons = buttons
+    local w = math.max(170, math.min(380, #loc.n * 8 + 16))
+    local h = 28 + #buttons * POPUP_ROW_H + 4
+    local x = math.max(2, math.min(off.x + 8, viewSize.x - w - 2))
+    local y = math.max(2, math.min(off.y + 8, viewSize.y - h - 2))
+    local white = tex(ICONS .. 'white.png')
+    local items = {
+        { type = ui.TYPE.Image, props = { resource = white, color = rgb(0.08, 0.06, 0.04), alpha = 0.96, size = v2(w, h) } },
+        { type = ui.TYPE.Text, props = { text = loc.n, textSize = 15, textColor = COLOR_TEXT_DIM, position = v2(8, 5) } },
+    }
+    for i, b in ipairs(buttons) do
+        local rowY = 28 + (i - 1) * POPUP_ROW_H
+        items[#items + 1] = { type = ui.TYPE.Image, props = { resource = white, color = rgb(0.3, 0.24, 0.15),
+            alpha = 0.55, position = v2(4, rowY), size = v2(w - 8, POPUP_ROW_H - 3) } }
+        items[#items + 1] = { type = ui.TYPE.Text, props = { text = b.label, textSize = 16, textColor = b.color,
+            position = v2(12, rowY + 2) } }
+        items[#items + 1] = {
+            type = ui.TYPE.Image,
+            props = { resource = white, alpha = 0, position = v2(4, rowY), size = v2(w - 8, POPUP_ROW_H - 3) },
+            events = {
+                mousePress = async:callback(function(e)
+                    lastMousePressFrame = frameCount
+                    if e.button == 1 then b.action() end
+                end),
+                mouseMove = async:callback(function() popupHover = i end),
+                focusGain = async:callback(function() popupHover = i end),
+                focusLoss = async:callback(function()
+                    if popupHover == i then popupHover = nil end
+                end),
+            },
+        }
+    end
+    popupEl.layout.props.position = v2(x, y)
+    popupEl.layout.props.size = v2(w, h)
+    popupEl.layout.content = ui.content(items)
+    popupEl:update()
+end
+
+-- what a left click on a marker does, by mouse or controller
+local function activateMarker(loc, off)
+    if travelEnabled() then
+        openPopup(loc, off)
+    else
+        trackLocation(loc)
+        buildLayer()
+        updateHover(off)
+    end
+end
+
+-- what a right click does: remove the pin under the cursor, or drop a new one
+local function togglePin(off)
+    local m = hitTest(off)
+    if m and m.pin then
+        local i = findTracked(m.pin.key)
+        if i then untrack(i, 'Removed ') end
+    else
+        addPin(mapToWorld(viewToMap(off)))
+    end
+    buildLayer()
+    updateHover(off)
 end
 
 -- ------------------------------------------------------------------ window
 
 local function destroyWindow()
     -- nested elements are destroyed explicitly (orphaned elements can crash on reload)
-    for _, el in ipairs({ mapLayer, resultsEl, header, placeholder }) do
+    for _, el in ipairs({ mapLayer, popupEl, resultsEl, header, placeholder }) do
         if el then el:destroy() end
     end
     if root then root:destroy() end
-    root, mapLayer, resultsEl, header, placeholder = nil, nil, nil, nil, nil
+    root, mapLayer, popupEl, resultsEl, header, placeholder = nil, nil, nil, nil, nil, nil
+    popupLoc = nil
 end
 
 local function createWindow(which)
@@ -489,6 +704,12 @@ local function createWindow(which)
     mapLayer = ui.create {
         type = ui.TYPE.Widget,
         props = { size = v2(data.mapWidth * ZOOM_MAX, data.mapHeight * ZOOM_MAX) },
+        content = ui.content {},
+    }
+
+    popupEl = ui.create {
+        type = ui.TYPE.Widget,
+        props = { position = v2(0, 0), size = v2(0, 0) },
         content = ui.content {},
     }
 
@@ -532,7 +753,7 @@ local function createWindow(which)
                 end
             end),
             keyPress = async:callback(function(e)
-                if e.code == input.KEY.M then typedM = true end
+                if e.code == mapKey() then typedM = true end
                 if (e.code == input.KEY.Enter or e.code == input.KEY.NP_Enter) and results[1] then
                     selectResult(results[1])
                 end
@@ -545,18 +766,15 @@ local function createWindow(which)
         props = { resource = tex(ICONS .. 'white.png'), alpha = 0, relativeSize = v2(1, 1) },
         events = {
             mousePress = async:callback(function(e)
+                lastMousePressFrame = frameCount
+                if popupLoc then           -- a click off the popup just closes it
+                    closePopup()
+                    return
+                end
                 if e.button == 1 then
                     press = { pos = e.position, center = center, moved = false }
                 elseif e.button == 3 then
-                    local m = hitTest(e.offset)
-                    if m and m.pin then
-                        local i = findTracked(m.pin.key)
-                        if i then untrack(i, 'Removed ') end
-                    else
-                        addPin(mapToWorld(viewToMap(e.offset)))
-                    end
-                    buildLayer()
-                    updateHover(e.offset)
+                    togglePin(e.offset)
                 end
             end),
             mouseMove = async:callback(function(e)
@@ -584,11 +802,7 @@ local function createWindow(which)
                     buildLayer()
                 else
                     local m = hitTest(e.offset)
-                    if m and m.loc then
-                        trackLocation(m.loc)
-                        buildLayer()
-                        updateHover(e.offset)
-                    end
+                    if m and m.loc then activateMarker(m.loc, e.offset) end
                 end
             end),
         },
@@ -608,6 +822,7 @@ local function createWindow(which)
             },
             mapLayer,
             overlay,
+            popupEl,
         },
     }
 
@@ -658,7 +873,13 @@ local function show()
     press, highlight, hoverText = nil, nil, nil
     results = {}
     renderResults()
-    centerOnPlayer()
+    if restoreCenter then                      -- reopened after B closed the popup: same view
+        center = restoreCenter
+        restoreCenter = nil
+        clampCenter()
+    else
+        centerOnPlayer()
+    end
     setHeader(defaultHeader())
     root.layout.props.visible = true
     root:update()
@@ -666,6 +887,8 @@ local function show()
 end
 
 local function hide()
+    if popupLoc then popupHiddenFrame = frameCount end
+    closePopup()
     visible = false
     press = nil
     mouseOff = nil
@@ -677,11 +900,35 @@ end
 
 I.UI.registerWindow('Map', show, hide)
 
+-- ------------------------------------------------------------------ quest-controlled doors
+
+-- The global script reports which door rules currently hide their doors.
+local function onGates(hidden)
+    local nextHidden, changed = {}, false
+    for _, id in ipairs(hidden) do
+        nextHidden[id] = true
+        if not hiddenGates[id] then changed = true end
+    end
+    for id in pairs(hiddenGates) do
+        if not nextHidden[id] then changed = true end
+    end
+    if not changed then return end
+    hiddenGates = nextHidden
+    for _, loc in ipairs(data.locations) do
+        if loc.g and hiddenGates[loc.g] then
+            local i = findTracked(locKey(loc))
+            if i then untrack(i, 'No longer there: ') end
+        end
+    end
+    if visible then
+        closePopup()
+        buildLayer()
+    end
+end
+
 -- ------------------------------------------------------------------ engine handlers
 
-local function onMouseWheel(vertical)
-    if not visible or not vertical or vertical == 0 then return end
-    local z = vertical > 0 and zoom * ZOOM_STEP or zoom / ZOOM_STEP
+local function zoomTo(z)
     z = math.max(ZOOM_MIN, math.min(ZOOM_MAX, z))
     if z == zoom then return end
     if mouseOff and not press then
@@ -698,8 +945,101 @@ local function onMouseWheel(vertical)
     if mouseOff then updateHover(mouseOff) end
 end
 
+local function onMouseWheel(vertical)
+    if not visible or not vertical or vertical == 0 then return end
+    closePopup()
+    lastWheelFrame = frameCount
+    zoomTo(vertical > 0 and zoom * ZOOM_STEP or zoom / ZOOM_STEP)
+end
+
+-- ------------------------------------------------------------------ controller
+
+-- A: press the popup button under the cursor, or select the marker under it
+local function padClick()
+    if popupLoc then
+        local b = popupButtons and popupButtons[popupHover]
+        if b then b.action() else closePopup() end
+        return
+    end
+    if not mouseOff then return end
+    local m = hitTest(mouseOff)
+    if m and m.loc then activateMarker(m.loc, mouseOff) end
+end
+
+local function onControllerButtonPress(id)
+    local BUTTON = input.CONTROLLER_BUTTON
+    if id == mapButton() then
+        local current = I.UI.getMode()
+        if current == nil then
+            openSolo = true
+            I.UI.setMode('Interface', { windows = { 'Map' } })
+        elseif current == 'Interface' and visible and mode == 'full' then
+            I.UI.removeMode('Interface')
+        end
+        return
+    end
+    if id == BUTTON.B and (popupLoc or frameCount - popupHiddenFrame <= 2) then
+        -- the engine's B also leaves the menu: bring the map straight back if it does
+        closePopup()
+        keepMap = { solo = mode == 'full', frames = 3, center = center }
+        return
+    end
+    if not visible then return end
+    if id == BUTTON.A then
+        pendingPadClick = frameCount
+    elseif id == BUTTON.X then
+        if popupLoc then
+            closePopup()
+        elseif mouseOff then
+            togglePin(mouseOff)
+        end
+    end
+end
+
+-- right stick forward zooms in, back zooms out; paused frames have no game time, so use real time
+local function updateStickZoom()
+    if press or frameCount - lastWheelFrame < 15 then return end   -- the wheel is in use
+    local v = input.getAxisValue(input.CONTROLLER_AXIS.RightY)
+    if math.abs(v) < STICK_DEADZONE then
+        stickZoomTimer = 0
+        return
+    end
+    stickZoomTimer = stickZoomTimer + core.getRealFrameDuration()
+    if stickZoomTimer < STICK_ZOOM_INTERVAL then return end
+    local amount = (math.abs(v) - STICK_DEADZONE) / (1 - STICK_DEADZONE)
+    local direction = v < 0 and 1 or -1                            -- stick forward reads negative
+    closePopup()
+    zoomTo(zoom * math.exp(direction * amount * STICK_ZOOM_RATE * stickZoomTimer))
+    stickZoomTimer = 0
+end
+
+local function updateController()
+    if pendingPadClick and frameCount - pendingPadClick >= 2 then
+        local pressedAt = pendingPadClick
+        pendingPadClick = nil
+        -- if the engine turned this press into a mouse click, that click already did the job
+        if visible and lastMousePressFrame < pressedAt then padClick() end
+    end
+    if keepMap then
+        keepMap.frames = keepMap.frames - 1
+        if not visible and I.UI.getMode() == nil then
+            local solo = keepMap.solo
+            openSolo, restoreCenter = solo, keepMap.center
+            keepMap = nil
+            if solo then
+                I.UI.setMode('Interface', { windows = { 'Map' } })
+            else
+                I.UI.setMode('Interface')
+            end
+        elseif keepMap.frames <= 0 then
+            keepMap = nil
+        end
+    end
+    if visible then updateStickZoom() end
+end
+
 local function onKeyPress(key)
-    if key.code ~= input.KEY.M then return end
+    if key.code ~= mapKey() then return end
     local current = I.UI.getMode()
     if current == nil then
         openSolo = true
@@ -711,6 +1051,8 @@ local function onKeyPress(key)
 end
 
 local function onFrame(dt)
+    frameCount = frameCount + 1
+    updateController()
     if pendingClose then
         if not typedM and visible then I.UI.removeMode('Interface') end
         pendingClose = false
@@ -726,12 +1068,14 @@ local function onFrame(dt)
     clearCheckTimer = clearCheckTimer + (dt or 0)
     if clearCheckTimer > 0.5 then
         clearCheckTimer = 0
+        recordVisit()
         checkReached()
     end
 end
 
 local function onSave()
-    return { lastExterior = lastExterior, zoom = zoom, tracked = tracked, pinCounter = pinCounter }
+    return { lastExterior = lastExterior, zoom = zoom, tracked = tracked, pinCounter = pinCounter,
+             visited = visited }
 end
 
 local function onLoad(saved)
@@ -740,6 +1084,7 @@ local function onLoad(saved)
         zoom = saved.zoom or zoom
         tracked = saved.tracked or {}
         pinCounter = saved.pinCounter or 0
+        visited = saved.visited or {}
     end
 end
 
@@ -761,8 +1106,14 @@ return {
     engineHandlers = {
         onMouseWheel = onMouseWheel,
         onKeyPress = onKeyPress,
+        onControllerButtonPress = onControllerButtonPress,
         onFrame = onFrame,
+        onUpdate = onUpdate,
         onSave = onSave,
         onLoad = onLoad,
+    },
+    eventHandlers = {
+        NGLA_SurveyReply = onSurveyReply,
+        NGLA_Gates = onGates,
     },
 }

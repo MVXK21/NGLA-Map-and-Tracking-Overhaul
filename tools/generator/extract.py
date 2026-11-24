@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import esm
+import gates as gatelib
 
 CELL_UNITS = 8192.0
 
@@ -69,6 +70,12 @@ class World:
     # info id -> (speaker id, PositionCell targets, scripts started)
     info_targets: dict[str, tuple[str, set[str], set[str]]] = field(default_factory=dict)
     ltex: dict[int, dict[int, str]] = field(default_factory=dict)      # plugin index -> LTEX index -> texture
+    # where teleports put the player: cell -> (x, y, z, z rotation in radians)
+    position_cell: dict[str, tuple] = field(default_factory=dict)      # Player->PositionCell
+    travel_dest: dict[str, tuple] = field(default_factory=dict)        # NPC travel services
+    # scripts that enable or disable their object, and the global variables they may test
+    toggle_scripts: dict[str, str] = field(default_factory=dict)       # script id -> source
+    global_names: set[str] = field(default_factory=set)
 
 
 # Developer, test and holding cells: never markers, door targets or sub-maps.
@@ -87,7 +94,8 @@ def is_dev_cell(name: str) -> bool:
 # Player->PositionCell x y z rot "cell" (commas optional). Only the player
 # form counts: "SomeNPC"->PositionCell just moves that NPC around.
 _POSITION_CELL = re.compile(
-    r'player\s*->\s*positioncell\s*,?\s*-?[\d.]+\s*,?\s*-?[\d.]+\s*,?\s*-?[\d.]+\s*,?\s*-?[\d.]+\s*,?\s*"([^"]+)"', re.I)
+    r'player\s*->\s*positioncell\s*,?\s*(-?[\d.]+)\s*,?\s*(-?[\d.]+)\s*,?\s*(-?[\d.]+)\s*,?\s*(-?[\d.]+)\s*,?\s*"([^"]+)"',
+    re.I)
 _SCRIPTED_OBJECTS = {"ACTI", "DOOR", "NPC_", "CREA", "CONT", "MISC", "BOOK", "ALCH",
                      "WEAP", "ARMO", "CLOT", "LIGH", "INGR", "APPA", "LOCK", "PROB", "REPA"}
 
@@ -95,8 +103,23 @@ _SCRIPTED_OBJECTS = {"ACTI", "DOOR", "NPC_", "CREA", "CONT", "MISC", "BOOK", "AL
 _START_SCRIPT = re.compile(r'startscript\s*,?\s*"?([\w ]+?)"?\s*$', re.I | re.M)
 
 
+_TOGGLES = re.compile(r"^\s*(disable|enable)\b", re.I | re.M)
+
+
 def _targets(text: bytes) -> set[str]:
-    return {m.strip().lower() for m in _POSITION_CELL.findall(text.decode(esm.ENCODING, "replace"))}
+    return {m[4].strip().lower() for m in _POSITION_CELL.findall(text.decode(esm.ENCODING, "replace"))}
+
+
+def _positions(text: bytes) -> dict[str, tuple]:
+    """Player->PositionCell targets: cell -> (x, y, z, z rotation in radians).
+    For the player, PositionCell's rotation is in degrees."""
+    out = {}
+    for x, y, z, rot, cell in _POSITION_CELL.findall(text.decode(esm.ENCODING, "replace")):
+        try:
+            out[cell.strip().lower()] = (float(x), float(y), float(z), math.radians(float(rot)))
+        except ValueError:
+            continue
+    return out
 
 
 def _started(text: bytes) -> set[str]:
@@ -112,7 +135,7 @@ def cell_key(cell: esm.Cell) -> tuple:
 def load_world(paths: list[Path], with_land: bool = True, log=print) -> World:
     world = World([p.name for p in paths])
     lower_names = [p.name.lower() for p in paths]
-    wanted = {"CELL", "REGN", "SCPT", "INFO"} | _SCRIPTED_OBJECTS | ({"LAND", "LTEX"} if with_land else set())
+    wanted = {"CELL", "REGN", "SCPT", "INFO", "GLOB"} | _SCRIPTED_OBJECTS | ({"LAND", "LTEX"} if with_land else set())
     for file_idx, path in enumerate(paths):
         masters = [m.lower() for m in esm.read_masters(path)]
         master_idx = [lower_names.index(m) if m in lower_names else -1 for m in masters]
@@ -147,12 +170,25 @@ def load_world(paths: list[Path], with_land: bool = True, log=print) -> World:
                 hd, tx = rec.first("SCHD"), rec.first("SCTX")
                 if hd:
                     world.script_targets[esm.cstr(hd[:32]).lower()] = _targets(tx) if tx else set()
+                    if tx:
+                        world.position_cell.update(_positions(tx))
+                        sid, source = esm.cstr(hd[:32]).lower(), tx.decode(esm.ENCODING, "replace")
+                        if _TOGGLES.search(source):
+                            world.toggle_scripts[sid] = source
+                        else:
+                            world.toggle_scripts.pop(sid, None)
+            elif rec.type == "GLOB":
+                n = rec.first("NAME")
+                if n:
+                    world.global_names.add(esm.cstr(n).lower())
             elif rec.type == "INFO":
                 iid = rec.first("INAM")
                 if iid:
                     b, o = rec.first("BNAM"), rec.first("ONAM")
                     t = _targets(b) if b else set()
                     s = _started(b) if b else set()
+                    if b:
+                        world.position_cell.update(_positions(b))
                     if t or s:
                         world.info_targets[esm.cstr(iid)] = (esm.cstr(o).lower() if o else "", t, s)
                     else:
@@ -168,14 +204,17 @@ def load_world(paths: list[Path], with_land: bool = True, log=print) -> World:
                 else:
                     world.object_script.pop(oid, None)
                 if rec.type == "NPC_" or rec.type == "CREA":
-                    dests, pending = [], False
+                    dests, pending, spot = [], False, None
                     for sn, sd in rec.subs:
                         if sn == "DODT":
                             if pending:
                                 dests.append("")       # exterior destination
                             pending = True
+                            spot = esm._F3x2.unpack_from(sd) if len(sd) >= 24 else None
                         elif sn == "DNAM" and pending:
                             dests.append(esm.cstr(sd).lower())
+                            if spot:
+                                world.travel_dest[dests[-1]] = (spot[0], spot[1], spot[2], spot[5])
                             pending = False
                     if pending:
                         dests.append("")
@@ -241,6 +280,56 @@ class Location:
     doors: int = 0
     town_interior: bool = False   # a house/shop inside a named town cell
     space: str | None = None      # None = main exterior map; else the quasi-exterior cell it's in
+    # fast travel landing spot: (x, y, z, z rotation); None = no safe spot known
+    arrive: tuple | None = None
+    arrive_cell: str | None = None     # interior to land in; None = the exterior
+    arrive_ground: bool = False        # spot picked from terrain: settle onto the ground on arrival
+    gate: int | None = None            # 1-based index into the door rules: exists only while they allow
+
+
+def _nearest_spot(spots: list, x: float, y: float, max_dist: float):
+    best, best_d = None, max_dist
+    for s in spots:
+        d = math.hypot(s[0] - x, s[1] - y)
+        if d <= best_d:
+            best, best_d = s, d
+    return best
+
+
+def _open_ground(world: World, cells: list, cx: float, cy: float):
+    """A flat, dry spot clear of placed objects, for named places with no doors."""
+    import numpy as np
+    for max_slope, min_clear in ((96, 150), (400, 60)):     # prefer flat and open; settle for any dry spot
+        best, best_score = None, None
+        for c in cells:
+            land = world.land.get(c.grid)
+            if land is None or land.heights is None:
+                continue
+            H = land.heights
+            refs = [r.pos[:2] for r in world.refs.get(("ext", c.grid[0], c.grid[1]), {}).values()]
+            xy = np.array(refs, dtype=np.float32) if refs else None
+            for row in range(4, 61, 4):                # row 0 of LAND is the south edge
+                for col in range(4, 61, 4):
+                    h = float(H[row, col])
+                    if h < 32:
+                        continue                       # under or at the water line
+                    slope = max(abs(float(H[row, col + 2] - H[row, col - 2])),
+                                abs(float(H[row + 2, col] - H[row - 2, col])))
+                    if slope > max_slope:
+                        continue
+                    x = (c.grid[0] + col / 64) * CELL_UNITS
+                    y = (c.grid[1] + row / 64) * CELL_UNITS
+                    clear = 600.0
+                    if xy is not None:
+                        clear = min(clear, float(np.hypot(xy[:, 0] - x, xy[:, 1] - y).min()))
+                    if clear < min_clear:
+                        continue
+                    score = clear - 0.05 * math.hypot(x - cx, y - cy) - slope
+                    if best_score is None or score > best_score:
+                        best, best_score = (x, y, h + 32, 0.0), score
+        if best:
+            return best
+    return None
 
 
 def extract(world: World) -> dict:
@@ -277,6 +366,7 @@ def extract(world: World) -> dict:
     ext_doors: list[tuple[esm.CellRef, esm.Cell]] = []
     links: dict[str, set[str]] = defaultdict(set)
     exits_to_ext: dict[str, list] = defaultdict(list)   # interior -> exterior door targets
+    exit_arrivals: dict[str, list] = defaultdict(list)  # interior -> (x, y, z, z rot) just outside its doors
     interior_doors: dict[str, list] = defaultdict(list)  # interior -> [(door pos, target interior or None, dest pos)]
     north: dict[str, float] = {}
 
@@ -305,6 +395,14 @@ def extract(world: World) -> dict:
                         links[t].add(key[1])
                 else:
                     exits_to_ext[key[1]].append([round(v) for v in ref.dest_pos[:3]])
+                    exit_arrivals[key[1]].append((*ref.dest_pos, ref.dest_rot[2]))
+
+    # every hand-placed outdoor arrival point, by exterior cell
+    arrivals_by_grid: dict[tuple, list] = defaultdict(list)
+    for c, spots in exit_arrivals.items():
+        if c not in quasi_keys:
+            for s in spots:
+                arrivals_by_grid[grid_of(s)].append(s)
 
     named_ext = {(c.grid): c.name for k, c in world.cells.items()
                  if k[0] == "ext" and c.name and not is_dev_cell(c.name)}
@@ -324,19 +422,47 @@ def extract(world: World) -> dict:
             entrances_per_prefix[prefix(town_name).lower()] += 1
     towns = {p for p, n in entrances_per_prefix.items() if n >= 5}
 
+    # doors that quests enable and disable: identical rules share one gate
+    gate_rules: list[list] = []
+    gate_index: dict[str, int] = {}
+    compiled: dict[str, int | None] = {}
+
+    def gate_of(ref) -> int | None:
+        sid = world.object_script.get(ref.id)
+        if sid is None or sid not in world.toggle_scripts:
+            return None
+        if sid not in compiled:
+            rules = gatelib.compile_script(world.toggle_scripts[sid], world.global_names)
+            if rules is None:
+                compiled[sid] = None
+            else:
+                key = repr(rules)
+                if key not in gate_index:
+                    gate_rules.append(rules)
+                    gate_index[key] = len(gate_rules)
+                compiled[sid] = gate_index[key]
+        return compiled[sid]
+
     locations: list[Location] = []
     entrance_of: dict[str, str] = {}
     for target, doors in sorted(by_target.items()):
-        clusters: list[list] = []
+        # doors for different quest stages are separate markers, never averaged together
+        by_gate: dict[int | None, list] = defaultdict(list)
         for ref, cell in doors:
-            for cl in clusters:
-                r0 = cl[0][0]
-                if math.dist(ref.pos[:2], r0.pos[:2]) < 2 * CELL_UNITS:
-                    cl.append((ref, cell))
-                    break
-            else:
-                clusters.append([(ref, cell)])
-        for i, cl in enumerate(clusters):
+            by_gate[gate_of(ref)].append((ref, cell))
+        clusters: list[tuple] = []
+        for gate in sorted(by_gate, key=lambda v: -1 if v is None else v):   # always-there doors first
+            gate_clusters: list[list] = []
+            for ref, cell in by_gate[gate]:
+                for cl in gate_clusters:
+                    r0 = cl[0][0]
+                    if math.dist(ref.pos[:2], r0.pos[:2]) < 2 * CELL_UNITS:
+                        cl.append((ref, cell))
+                        break
+                else:
+                    gate_clusters.append([(ref, cell)])
+            clusters += [(gate, cl) for cl in gate_clusters]
+        for i, (gate, cl) in enumerate(clusters):
             r0, c0 = cl[0]
             name = interiors[target].name
             pos = tuple(sum(r.pos[j] for r, _ in cl) / len(cl) for j in range(3))
@@ -359,7 +485,16 @@ def extract(world: World) -> dict:
                 doors=len(cl),
                 town_interior=in_town,
                 space=space,
+                gate=gate,
             )
+            if space is None:
+                # land just outside this door; a one-way door lands at its inside arrival
+                spot = _nearest_spot(exit_arrivals.get(target, []), pos[0], pos[1], CELL_UNITS / 4)
+                if spot:
+                    loc.arrive = spot
+                else:
+                    loc.arrive = (*r0.dest_pos, r0.dest_rot[2])
+                    loc.arrive_cell = name
             locations.append(loc)
             entrance_of.setdefault(target, loc.id)
 
@@ -391,22 +526,40 @@ def extract(world: World) -> dict:
                     break
             else:
                 groups.append([c])
+        # a mod moved this place (Tomb of the Snow Prince relocates Solstheim): the old cells
+        # keep the name, but their contents were deleted
+        live = [sum(len(world.refs.get(("ext", c.grid[0], c.grid[1]), {})) for c in g) for g in groups]
         for i, g in enumerate(groups):
+            if live[i] <= 5 and max(live) >= 20:
+                continue
             cx = sum(c.grid[0] for c in g) / len(g)
             cy = sum(c.grid[1] for c in g) / len(g)
             pos = ((cx + 0.5) * CELL_UNITS, (cy + 0.5) * CELL_UNITS, 0.0)
+            spots = [s for c in g for s in arrivals_by_grid.get(c.grid, [])]
+            spot = _nearest_spot(spots, pos[0], pos[1], float("inf"))
+            ground = False
+            if spot is None:
+                spot = _open_ground(world, g, pos[0], pos[1])
+                ground = spot is not None
+                if spot is None and not any(
+                        world.land.get(c.grid) is not None and world.land[c.grid].heights is not None
+                        and float(world.land[c.grid].heights.max()) > 32 for c in g):
+                    # a place a mod moved away (Tomb of the Snow Prince relocates
+                    # Solstheim): only open water is left under the old cell name
+                    continue
             locations.append(Location(
-                id="ext:" + name.lower() + (f"#{i}" if i else ""),
-                name=name, kind="landmark",
+                id="ext:" + name.strip().lower() + (f"#{i}" if i else ""),
+                name=name.strip(), kind="landmark",
                 pos=tuple(round(v) for v in pos), grid=grid_of(pos),
                 region=world.regions.get(g[0].region or "", g[0].region),
+                arrive=spot, arrive_ground=ground,
             ))
 
     # quasi-exterior interiors (Mournhold etc.)
     quasi = sorted(interiors[k].name for k in quasi_keys)
 
     teleport_locs, unowned = _teleport_locations(world, interiors, quasi_keys, links, exits_to_ext,
-                                                 owner, loc_by_id)
+                                                 owner, loc_by_id, exit_arrivals)
     locations += teleport_locs
 
     # Way out of every interior, for the compass:
@@ -450,6 +603,7 @@ def extract(world: World) -> dict:
         "unreachable_interiors": unowned,
         "dev_cells": dev_cells,
         "teleport_locations": teleport_locs,
+        "gates": gate_rules,
     }
 
 
@@ -465,7 +619,7 @@ def _cluster(points: list, radius: float = 2 * CELL_UNITS) -> list[list]:
     return groups
 
 
-def _teleport_locations(world, interiors, quasi_keys, links, exits_to_ext, owner, loc_by_id):
+def _teleport_locations(world, interiors, quasi_keys, links, exits_to_ext, owner, loc_by_id, exit_arrivals):
     """Markers for places no exterior door leads to.
 
     Each group of linked unreachable interiors (or a whole quasi-exterior town
@@ -543,6 +697,7 @@ def _teleport_locations(world, interiors, quasi_keys, links, exits_to_ext, owner
         if sp:
             town_cells["quasi:" + prefix(sp).lower()].append(c)
 
+    gated_doors = [l.pos for l in loc_by_id.values() if l.gate is not None and l.space is None]
     locs: list[Location] = []
     unplaced: list[str] = []
     for gid, members in sorted(groups.items()):
@@ -552,6 +707,11 @@ def _teleport_locations(world, interiors, quasi_keys, links, exits_to_ext, owner
         tp_pts = [tuple(p) for m in tp_cells for s in sources[m] for p in stands.get(s, ())]
         pts = exit_pts or tp_pts
         if not pts:
+            unplaced += [interiors[m].name for m in members]
+            continue
+        # nothing leads in, and its way out is right beside a quest-controlled door: an unused
+        # earlier version of that building (Raven Rock's old Smith and Trader cells)
+        if not tp_pts and any(math.dist(p[:2], d[:2]) < 400 for p in exit_pts for d in gated_doors):
             unplaced += [interiors[m].name for m in members]
             continue
         if gid.startswith("quasi:"):
@@ -566,10 +726,22 @@ def _teleport_locations(world, interiors, quasi_keys, links, exits_to_ext, owner
             pos = tuple(round(sum(p[j] for p in cl) / len(cl)) for j in range(2)) + (0,)
             g = grid_of(pos)
             c0 = world.cells.get(("ext", g[0], g[1]))
+            # landing: outside its door if it has one, else where the game's own teleport puts you
+            arrive, arrive_cell = None, None
+            if exit_pts:
+                spots = [s for m in members for s in exit_arrivals.get(m, ())]
+                arrive = _nearest_spot(spots, pos[0], pos[1], 2 * CELL_UNITS)
+            else:
+                for m in tp_cells:
+                    spot = world.position_cell.get(m) or world.travel_dest.get(m)
+                    if spot:
+                        arrive, arrive_cell = spot, interiors[m].name
+                        break
             locs.append(Location(
                 id="tp:" + gid + (f"#{i}" if i else ""),
                 name=name, kind=kind, pos=pos, grid=g,
                 region=world.regions.get((c0.region if c0 else "") or "", c0.region if c0 else None),
                 cells=[interiors[m].name for m in members],
+                arrive=arrive, arrive_cell=arrive_cell,
             ))
     return locs, sorted(unplaced)

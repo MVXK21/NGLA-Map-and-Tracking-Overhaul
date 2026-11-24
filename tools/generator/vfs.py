@@ -49,7 +49,11 @@ class VFS:
             for d in reversed(data_dirs):
                 p = d / a
                 if p.is_file():
-                    self.archives.append(BSA(p))
+                    try:
+                        self.archives.append(BSA(p))
+                    except (ValueError, OSError, struct.error, UnicodeDecodeError) as e:
+                        # e.g. the "Invalidation" stub some tools leave in Data Files
+                        print(f"Skipping unreadable archive {p.name}: {e}")
                     break
 
     def _index(self, subdir: str) -> dict[str, Path]:

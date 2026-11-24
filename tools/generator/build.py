@@ -62,6 +62,10 @@ def build(profile: str, paths: list[Path], cfg: Path, px: int = 64,
         f"landmarks (named exterior cells): {sum(l.kind == 'landmark' for l in locs)}",
         f"interior cells grouped under entrances: {sum(len(l.cells) for l in ent)}",
         f"teleport-only places placed: {len(data['teleport_locations'])}",
+        f"fast travel landings: {sum(1 for l in locs if l.arrive and not l.space)} of "
+        f"{sum(1 for l in locs if not l.space)} markers ({sum(1 for l in locs if l.arrive_cell and not l.space)} "
+        f"land indoors, {sum(1 for l in locs if l.arrive_ground)} on open ground)",
+        f"quest-controlled door markers: {sum(1 for l in locs if l.gate)} ({len(data['gates'])} rule sets)",
         f"dev/test cells filtered: {len(data['dev_cells'])}",
         f"interiors still unplaced: {len(data['unreachable_interiors'])}",
         f"NorthMarkers: {len(data['north_markers'])}",
@@ -77,7 +81,7 @@ def build(profile: str, paths: list[Path], cfg: Path, px: int = 64,
         "== dev / test cells filtered ==",
         *data["dev_cells"],
     ]
-    log("\n".join(report[2:11]))
+    log("\n".join(report[2:13]))
 
     if report_dir is not None:
         report_dir.mkdir(parents=True, exist_ok=True)
@@ -104,6 +108,7 @@ def build(profile: str, paths: list[Path], cfg: Path, px: int = 64,
         log(f"Wrote {r['tiles']} map tiles (empty ocean skipped); per level: "
             + ", ".join(f"{lp}px/cell {n}" for lp, n in r["levels"]))
         n = export.export_interiors(mod_dir, data["north_markers"], data["exits"], data["route"])
+        export.export_gates(mod_dir, data["gates"])
         log(f"Interior compass data: {n['exits']} cells with outdoor doors, {n['route']} with a route out")
         result["tiles"] = r["tiles"]
     log(f"Done in {time.time() - t0:.1f}s")
